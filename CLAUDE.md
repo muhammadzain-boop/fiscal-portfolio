@@ -78,6 +78,14 @@ App
 │   ├── PieChart (cost split) + BarChart (top items)
 │   ├── SubTabs: bom | overhead | chat
 │   └── AIBox (Claude optimization)
+├── [tab === "scenario"] → ScenarioPlanner
+│   ├── Base Financials grid (Revenue, COGS, Headcount, Salary, OpEx, Marketing)
+│   ├── SliderInput component (reusable, formats: pct/dollar/count, green fill track)
+│   ├── 8 sliders in 4 groups: Revenue | Cost Efficiency | Headcount | Operations
+│   ├── Live KPI cards: Scenario Profit, Profit Change, Revenue Impact, Cost Impact
+│   ├── BarChart: Base vs Scenario for 4 categories (Recharts)
+│   ├── P&L Summary table (ScenarioPLRow component)
+│   └── AIBox — CFO-level scenario analysis via callAI()
 ├── VoiceToast (bottom center, auto-dismiss 3.5s)
 ├── VoiceHelp modal
 └── ApiKeyModal
