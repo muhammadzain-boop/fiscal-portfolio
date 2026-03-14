@@ -1,0 +1,1135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FinanceAI Suite</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts@2/umd/Recharts.js"></script>
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; background: #07090f; color: #dde5f8; font-family: sans-serif; }
+    #loading { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 16px; }
+    #loading .spinner { width: 36px; height: 36px; border: 3px solid #1a2744; border-top: 3px solid #00d98b; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    #loading .msg { color: #4e6080; font-size: 14px; }
+    #error-box { display: none; margin: 40px; padding: 20px; background: rgba(255,61,90,0.1); border: 1px solid rgba(255,61,90,0.3); border-radius: 10px; color: #ff3d5a; font-size: 13px; white-space: pre-wrap; font-family: monospace; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div class="msg">Loading FinanceAI Suite…</div>
+    <div class="msg" style="font-size:11px">Loading React, Recharts, XLSX from CDN…</div>
+  </div>
+  <div id="error-box"></div>
+  <div id="root"></div>
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      document.getElementById('loading').style.display = 'none';
+      var box = document.getElementById('error-box');
+      box.style.display = 'block';
+      box.textContent = '❌ JavaScript Error:\n' + msg + '\n\nSource: ' + src + ':' + line;
+    };
+  </script>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+    const { createRoot } = ReactDOM;
+    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+      ResponsiveContainer, Cell, PieChart, Pie, Legend, LineChart, Line } = Recharts;
+
+    // ─── THEME ─────────────────────────────────────────────────────────────────
+    const T = {
+      bg: "#07090f", card: "#0f1520", card2: "#131d2e", border: "#1a2744",
+      border2: "#223060", text: "#dde5f8", muted: "#4e6080", dim: "#273550",
+      green: "#00d98b", red: "#ff3d5a", yellow: "#ffba08", blue: "#3b9eff",
+      purple: "#8b6fff", orange: "#ff7849",
+    };
+    const PIE = [T.green, T.blue, T.yellow, T.purple, T.orange, T.red];
+    const fmt$ = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmtK = (n) => Math.abs(n) >= 1000 ? `$${(n / 1000).toFixed(1)}K` : fmt$(n);
+    const fmtPct = (n) => `${Number(n || 0).toFixed(1)}%`;
+    const sign = (n) => (n > 0 ? "+" : "");
+
+    // ─── AI (multi-provider: Gemini free / Groq free / Claude paid) ────────────
+    async function callAI(system, user) {
+      const provider = localStorage.getItem("ai_provider") || "gemini";
+      const apiKey = localStorage.getItem("ai_api_key") || "";
+      if (!apiKey) return "⚠ No API key set. Click ⚙ AI Settings in the header to add your free API key.";
+
+      try {
+        if (provider === "gemini") {
+          const r = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+            { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ contents: [{ parts: [{ text: system + "\n\n" + user }] }], generationConfig: { maxOutputTokens: 1200 } }) }
+          );
+          const d = await r.json();
+          if (d.error) return `⚠ Gemini Error: ${d.error.message}`;
+          return d.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
+        }
+
+        if (provider === "groq") {
+          const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: 1200 }),
+          });
+          const d = await r.json();
+          if (d.error) return `⚠ Groq Error: ${d.error.message}`;
+          return d.choices?.[0]?.message?.content || "No response.";
+        }
+
+        if (provider === "claude") {
+          const r = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-allow-browser": "true" },
+            body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, system, messages: [{ role: "user", content: user }] }),
+          });
+          const d = await r.json();
+          if (d.error) return `⚠ Claude Error: ${d.error.message}`;
+          return d.content?.[0]?.text || "No response.";
+        }
+      } catch (e) { return `⚠ Network Error: ${e.message}`; }
+    }
+
+    // ─── ODOO CLIENT ───────────────────────────────────────────────────────────
+    class OdooClient {
+      constructor(url, db, username, password) {
+        this.url = url.replace(/\/$/, "");
+        this.db = db; this.username = username; this.password = password; this.uid = null;
+      }
+      async _rpc(endpoint, params) {
+        const r = await fetch(`${this.url}${endpoint}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "call", id: Date.now(), params }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error.data?.message || d.error.message || "Odoo RPC error");
+        return d.result;
+      }
+      async authenticate() {
+        const r = await this._rpc("/web/session/authenticate", {
+          db: this.db, login: this.username, password: this.password,
+        });
+        if (!r?.uid) throw new Error("Authentication failed. Check your credentials.");
+        this.uid = r.uid;
+        return this.uid;
+      }
+      async searchRead(model, domain = [], fields = [], limit = 500, offset = 0) {
+        return this._rpc("/web/dataset/call_kw", {
+          model, method: "search_read",
+          args: [domain],
+          kwargs: { fields, limit, offset, context: { lang: "en_US" } },
+        });
+      }
+      async fetchActuals(dateFrom, dateTo, groupBy = "account") {
+        const lines = await this.searchRead(
+          "account.move.line",
+          [
+            ["date", ">=", dateFrom], ["date", "<=", dateTo],
+            ["parent_state", "=", "posted"],
+            ["account_id.account_type", "in", ["expense", "income", "expense_direct_cost", "expense_depreciation"]],
+            ["company_id.active", "=", true],
+          ],
+          ["account_id", "analytic_account_id", "debit", "credit", "name", "date", "move_id"], 2000
+        );
+        const grouped = {};
+        for (const l of lines) {
+          let key = (groupBy === "analytic" && l.analytic_account_id) ? l.analytic_account_id[1] : (l.account_id ? l.account_id[1] : "Unclassified");
+          if (!grouped[key]) grouped[key] = { actual: 0, lines: [] };
+          grouped[key].actual += (l.debit - l.credit);
+          grouped[key].lines.push(l);
+        }
+        return Object.entries(grouped).filter(([, v]) => Math.abs(v.actual) > 0.01)
+          .map(([category, v]) => ({ category, actual: Math.abs(v.actual), lineCount: v.lines.length }));
+      }
+    }
+
+    // ─── VOICE ─────────────────────────────────────────────────────────────────
+    function parseVoice(t) {
+      const s = t.toLowerCase();
+      if (s.match(/analyz|insights|explain|why|ai report/)) return { action: "analyze" };
+      if (s.match(/fetch|sync|load|pull|get.*(odoo|actual|expense|live)/)) return { action: "fetchActuals" };
+      if (s.match(/export.*excel|download.*excel/)) return { action: "exportExcel" };
+      if (s.match(/export.*csv|download.*csv/)) return { action: "exportCsv" };
+      if (s.match(/upload|import|open.*file|budget.*file/)) return { action: "uploadBudget" };
+      const yearM = s.match(/(?:year|fetch|show)\s+(\d{4})/);
+      if (yearM) return { action: "setYear", value: yearM[1] };
+      const qM = s.match(/(?:quarter|q)\s*([1-4])\s*(?:of\s+)?(\d{4})?/);
+      if (qM) return { action: "setQuarter", q: +qM[1], year: qM[2] || new Date().getFullYear() };
+      return { action: "unknown" };
+    }
+
+    function VoiceMic({ onCommand }) {
+      const [listening, setListening] = useState(false);
+      const [supported] = useState(() => !!(window.SpeechRecognition || window.webkitSpeechRecognition));
+      const [lastText, setLastText] = useState("");
+      const recRef = useRef(null);
+      useEffect(() => {
+        if (!supported) return;
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const rec = new SR();
+        rec.continuous = false; rec.interimResults = true; rec.lang = "en-US";
+        rec.onstart = () => setListening(true);
+        rec.onend = () => setListening(false);
+        rec.onerror = () => setListening(false);
+        rec.onresult = (e) => {
+          const txt = Array.from(e.results).map(r => r[0].transcript).join(" ");
+          setLastText(txt);
+          if (e.results[e.results.length - 1].isFinal) onCommand(parseVoice(txt), txt);
+        };
+        recRef.current = rec;
+      }, []);
+      function toggle() {
+        if (!supported) return;
+        if (listening) recRef.current?.stop();
+        else { setLastText(""); try { recRef.current?.start(); } catch (_) {} }
+      }
+      if (!supported) return null;
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ position: "relative" }}>
+            {listening && <>
+              <div style={{ position: "absolute", inset: -6, borderRadius: "50%", border: `2px solid ${T.red}`, opacity: 0.5, animation: "vp 1.2s ease-out infinite" }} />
+              <div style={{ position: "absolute", inset: -13, borderRadius: "50%", border: `2px solid ${T.red}`, opacity: 0.2, animation: "vp 1.2s ease-out infinite 0.5s" }} />
+            </>}
+            <button onClick={toggle} style={{ width: 38, height: 38, borderRadius: "50%", background: listening ? T.red : "rgba(255,255,255,0.07)", border: `2px solid ${listening ? T.red : T.border2}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, color: listening ? "#fff" : T.muted, transition: "all 0.2s" }}>
+              {listening ? "⏹" : "🎤"}
+            </button>
+          </div>
+          {lastText && <span style={{ color: listening ? T.yellow : T.muted, fontSize: 11, fontStyle: "italic", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{listening ? "🔴 " : "✓ "}{lastText}</span>}
+        </div>
+      );
+    }
+
+    // ─── SHARED UI ─────────────────────────────────────────────────────────────
+    const inp = { background: "rgba(255,255,255,0.04)", border: `1px solid ${T.border2}`, borderRadius: 7, padding: "9px 13px", color: T.text, fontSize: 13, outline: "none", width: "100%", fontFamily: "inherit" };
+
+    function Btn({ children, onClick, variant = "primary", disabled, style = {}, title }) {
+      const v = {
+        primary: { background: T.green, color: "#07090f", border: "none" },
+        secondary: { background: "rgba(255,255,255,0.05)", color: T.text, border: `1px solid ${T.border2}` },
+        danger: { background: "rgba(255,61,90,0.1)", color: T.red, border: `1px solid rgba(255,61,90,0.25)` },
+        odoo: { background: "#7C1919", color: "#fff", border: "none" },
+        outline: { background: "transparent", color: T.blue, border: `1px solid ${T.blue}` },
+      };
+      return <button title={title} onClick={onClick} disabled={disabled} style={{ border: "none", borderRadius: 8, padding: "8px 16px", cursor: disabled ? "not-allowed" : "pointer", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", opacity: disabled ? 0.45 : 1, transition: "all 0.15s", letterSpacing: "0.01em", ...v[variant], ...style }}>{children}</button>;
+    }
+
+    function KPI({ label, value, sub, color, icon }) {
+      return (
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 18px", flex: 1, minWidth: 130 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+            {icon && <span style={{ fontSize: 14 }}>{icon}</span>}
+            <span style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em" }}>{label}</span>
+          </div>
+          <div style={{ color: color || T.text, fontSize: 22, fontWeight: 700, fontFamily: "monospace", letterSpacing: "-0.02em" }}>{value}</div>
+          {sub && <div style={{ color: T.muted, fontSize: 11, marginTop: 4 }}>{sub}</div>}
+        </div>
+      );
+    }
+
+    function Badge({ children, color }) {
+      const colors = { green: { bg: "rgba(0,217,139,0.1)", text: T.green }, red: { bg: "rgba(255,61,90,0.1)", text: T.red }, yellow: { bg: "rgba(255,186,8,0.1)", text: T.yellow }, blue: { bg: "rgba(59,158,255,0.1)", text: T.blue } };
+      const c = colors[color] || colors.blue;
+      return <span style={{ background: c.bg, color: c.text, padding: "3px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, letterSpacing: "0.05em" }}>{children}</span>;
+    }
+
+    function Spinner({ size = 14 }) {
+      return <div style={{ width: size, height: size, border: `2px solid ${T.border2}`, borderTop: `2px solid ${T.green}`, borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />;
+    }
+
+    function AIBox({ content, loading }) {
+      if (!content && !loading) return null;
+      return (
+        <div style={{ background: "rgba(0,217,139,0.03)", border: `1px solid rgba(0,217,139,0.15)`, borderRadius: 12, padding: "18px 22px", marginTop: 22 }}>
+          <div style={{ color: T.green, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.14em", marginBottom: 14, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: T.green, boxShadow: `0 0 8px ${T.green}` }} />
+            Claude AI Analysis
+          </div>
+          {loading ? <div style={{ display: "flex", alignItems: "center", gap: 10, color: T.muted, fontSize: 13 }}><Spinner /> Analyzing data with Claude…</div>
+            : <div style={{ color: T.text, fontSize: 13.5, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{content}</div>}
+        </div>
+      );
+    }
+
+    // ─── AI SETTINGS MODAL ─────────────────────────────────────────────────────
+    const PROVIDERS = [
+      { id: "gemini", label: "Google Gemini (Free)", model: "gemini-2.0-flash", placeholder: "AIza...", link: "aistudio.google.com", note: "Free: 1,500 requests/day — no credit card needed. Get key at Google AI Studio." },
+      { id: "groq",   label: "Groq (Free)",          model: "llama-3.3-70b",    placeholder: "gsk_...",  link: "console.groq.com",  note: "Free: 14,400 requests/day — ultra-fast LPU inference. Get key at Groq Console." },
+      { id: "claude", label: "Claude / Anthropic (Paid)", model: "claude-sonnet-4", placeholder: "sk-ant-...", link: "console.anthropic.com", note: "Paid API. $5 free credits on signup. Get key at Anthropic Console." },
+    ];
+
+    function ApiKeyModal({ onClose }) {
+      const [provider, setProvider] = useState(() => localStorage.getItem("ai_provider") || "gemini");
+      const [key, setKey] = useState(() => localStorage.getItem("ai_api_key") || "");
+      const [saved, setSaved] = useState(false);
+      const info = PROVIDERS.find(p => p.id === provider);
+
+      function save() {
+        localStorage.setItem("ai_provider", provider);
+        localStorage.setItem("ai_api_key", key.trim());
+        setSaved(true);
+        setTimeout(() => { setSaved(false); onClose(); }, 800);
+      }
+      function clear() {
+        localStorage.removeItem("ai_provider");
+        localStorage.removeItem("ai_api_key");
+        setKey("");
+      }
+
+      return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }}>
+          <div style={{ background: T.card, border: `1px solid ${T.border2}`, borderRadius: 14, padding: 28, maxWidth: 500, width: "92%" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <div>
+                <div style={{ color: T.text, fontSize: 16, fontWeight: 700 }}>⚙ AI Provider Settings</div>
+                <div style={{ color: T.muted, fontSize: 12, marginTop: 3 }}>Choose a free or paid AI provider for analysis</div>
+              </div>
+              <button onClick={onClose} style={{ background: "none", border: "none", color: T.muted, cursor: "pointer", fontSize: 20 }}>✕</button>
+            </div>
+
+            {/* Provider selector */}
+            <div style={{ color: T.muted, fontSize: 11, marginBottom: 6 }}>AI Provider</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {PROVIDERS.map(p => (
+                <div key={p.id} onClick={() => setProvider(p.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderRadius: 8, border: `1px solid ${provider === p.id ? T.green : T.border}`, background: provider === p.id ? "rgba(0,217,139,0.05)" : "transparent", cursor: "pointer", transition: "all 0.15s" }}>
+                  <div style={{ width: 16, height: 16, borderRadius: "50%", border: `2px solid ${provider === p.id ? T.green : T.muted}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {provider === p.id && <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />}
+                  </div>
+                  <div>
+                    <div style={{ color: T.text, fontSize: 13, fontWeight: 600 }}>{p.label}</div>
+                    <div style={{ color: T.muted, fontSize: 11 }}>Model: {p.model}</div>
+                  </div>
+                  {p.id !== "claude" && <Badge color="green" style={{ marginLeft: "auto" }}>FREE</Badge>}
+                </div>
+              ))}
+            </div>
+
+            {/* Info box */}
+            <div style={{ background: "rgba(59,158,255,0.06)", border: `1px solid rgba(59,158,255,0.18)`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: T.muted, lineHeight: 1.6 }}>
+              <strong style={{ color: T.blue }}>ℹ {info?.label}:</strong> {info?.note}<br />
+              <span style={{ color: T.blue }}>🔗 {info?.link}</span>
+            </div>
+
+            {/* Key input */}
+            <div style={{ color: T.muted, fontSize: 11, marginBottom: 6 }}>API Key</div>
+            <input
+              type="password" value={key} onChange={e => setKey(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && save()}
+              placeholder={info?.placeholder || "Paste your API key here"}
+              style={{ ...inp, marginBottom: 16, fontFamily: "monospace" }}
+            />
+            <div style={{ display: "flex", gap: 10 }}>
+              <Btn onClick={save} disabled={!key.trim()} style={{ minWidth: 120 }}>{saved ? "✓ Saved!" : "Save"}</Btn>
+              {key && <Btn variant="danger" onClick={clear}>Clear</Btn>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── STEP INDICATOR ────────────────────────────────────────────────────────
+    function StepIndicator({ steps, current }) {
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 0, marginBottom: 28 }}>
+          {steps.map((step, i) => {
+            const done = i < current, active = i === current;
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", flex: i < steps.length - 1 ? 1 : 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ width: 30, height: 30, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, transition: "all 0.3s", background: done ? T.green : active ? "rgba(0,217,139,0.15)" : T.dim, color: done ? "#07090f" : active ? T.green : T.muted, border: active ? `2px solid ${T.green}` : "2px solid transparent", boxShadow: active ? `0 0 14px rgba(0,217,139,0.3)` : "none" }}>
+                    {done ? "✓" : i + 1}
+                  </div>
+                  <div>
+                    <div style={{ color: active ? T.text : done ? T.green : T.muted, fontSize: 12, fontWeight: active ? 700 : 500 }}>{step.label}</div>
+                    <div style={{ color: T.muted, fontSize: 10 }}>{step.sub}</div>
+                  </div>
+                </div>
+                {i < steps.length - 1 && <div style={{ flex: 1, height: 2, background: done ? T.green : T.dim, margin: "0 16px", transition: "background 0.5s" }} />}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // ─── BUDGET FILE UPLOAD ────────────────────────────────────────────────────
+    function BudgetUploader({ onUpload, budgetData, period, setPeriod }) {
+      const [dragging, setDragging] = useState(false);
+      const [error, setError] = useState("");
+      const fileRef = useRef();
+
+      function parseBudgetFile(file) {
+        setError("");
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const wb = XLSX.read(ev.target.result, { type: "binary" });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+            const headers = (json[0] || []).map((h, i) => ({ text: String(h).toLowerCase().trim(), idx: i }));
+            const catCol = headers.find(h => h.text.match(/categ|item|account|name|description|dept|department/))?.idx ?? -1;
+            const budgetCol = headers.find(h => h.text.match(/budget|planned|plan|target|forecast/))?.idx ?? -1;
+
+            if (catCol === -1 || budgetCol === -1) {
+              const firstTextCol = headers.find(h => json.slice(1).map(r => r[h.idx]).some(v => v && isNaN(parseFloat(v))))?.idx ?? 0;
+              const firstNumCol = headers.find(h => json.slice(1).map(r => r[h.idx]).some(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0))?.idx ?? 1;
+              if (firstTextCol === firstNumCol) { setError("Could not detect columns. Ensure file has Category and Budget columns."); return; }
+              const rows = json.slice(1).filter(r => r[firstTextCol] && !isNaN(parseFloat(r[firstNumCol])) && parseFloat(r[firstNumCol]) > 0).map(r => ({ category: String(r[firstTextCol]).trim(), budget: parseFloat(r[firstNumCol]) || 0 }));
+              if (!rows.length) { setError("No valid rows found."); return; }
+              onUpload(rows); return;
+            }
+            const rows = json.slice(1).filter(r => r[catCol] && !isNaN(parseFloat(r[budgetCol])) && parseFloat(r[budgetCol]) > 0).map(r => ({ category: String(r[catCol]).trim(), budget: parseFloat(r[budgetCol]) || 0 }));
+            if (!rows.length) { setError("No valid rows found."); return; }
+            onUpload(rows);
+          } catch (err) { setError("Failed to parse file: " + err.message); }
+        };
+        reader.readAsBinaryString(file);
+      }
+
+      return (
+        <div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: T.muted, fontSize: 11, marginBottom: 6 }}>Period Label</div>
+              <input value={period} onChange={e => setPeriod(e.target.value)} placeholder="e.g. Q1 2025, FY 2025" style={inp} />
+            </div>
+          </div>
+          <div onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
+            onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) parseBudgetFile(f); }}
+            onClick={() => fileRef.current.click()}
+            style={{ border: `2px dashed ${dragging ? T.green : budgetData ? T.green : T.border2}`, borderRadius: 12, padding: "36px 24px", textAlign: "center", cursor: "pointer", background: dragging ? "rgba(0,217,139,0.05)" : budgetData ? "rgba(0,217,139,0.03)" : "rgba(255,255,255,0.02)", transition: "all 0.2s" }}>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (f) parseBudgetFile(f); e.target.value = ""; }} />
+            <div style={{ fontSize: 32, marginBottom: 12 }}>{budgetData ? "✅" : "📊"}</div>
+            {budgetData ? (
+              <><div style={{ color: T.green, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Budget loaded — {budgetData.length} categories</div><div style={{ color: T.muted, fontSize: 13 }}>Click or drop to replace</div></>
+            ) : (
+              <><div style={{ color: T.text, fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Drop your Budget Excel / CSV here</div><div style={{ color: T.muted, fontSize: 13, marginBottom: 14 }}>or click to browse</div></>
+            )}
+          </div>
+          {error && <div style={{ color: T.red, background: "rgba(255,61,90,0.08)", border: `1px solid rgba(255,61,90,0.2)`, borderRadius: 8, padding: "10px 14px", marginTop: 12, fontSize: 13 }}>⚠ {error}</div>}
+          {budgetData && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 8, overflow: "hidden" }}>
+                {budgetData.slice(0, 6).map((r, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "9px 14px", borderBottom: `1px solid ${T.border}` }}>
+                    <span style={{ color: T.text, fontSize: 13 }}>{r.category}</span>
+                    <span style={{ color: T.green, fontFamily: "monospace", fontSize: 13, fontWeight: 600 }}>{fmt$(r.budget)}</span>
+                  </div>
+                ))}
+                {budgetData.length > 6 && <div style={{ padding: "8px 14px", color: T.muted, fontSize: 12 }}>+{budgetData.length - 6} more…</div>}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 14px", background: T.dim, borderRadius: "0 0 8px 8px" }}>
+                <span style={{ color: T.muted, fontSize: 12, fontWeight: 700 }}>TOTAL BUDGET</span>
+                <span style={{ color: T.green, fontFamily: "monospace", fontSize: 14, fontWeight: 700 }}>{fmt$(budgetData.reduce((s, r) => s + r.budget, 0))}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── ODOO CONNECT ──────────────────────────────────────────────────────────
+    function OdooConnect({ onConnect, connected, connectedInfo, onDisconnect }) {
+      const [url, setUrl] = useState(""); const [db, setDb] = useState("");
+      const [user, setUser] = useState(""); const [pass, setPass] = useState("");
+      const [loading, setLoading] = useState(false); const [error, setError] = useState("");
+      const [collapsed, setCollapsed] = useState(connected);
+      useEffect(() => { if (connected) setCollapsed(true); }, [connected]);
+
+      async function connect() {
+        if (!url || !db || !user || !pass) { setError("All fields are required."); return; }
+        setLoading(true); setError("");
+        try {
+          const client = new OdooClient(url.trim(), db.trim(), user.trim(), pass);
+          await client.authenticate();
+          onConnect(client, { url: url.trim(), db: db.trim(), user: user.trim() });
+        } catch (e) { setError(e.message); } finally { setLoading(false); }
+      }
+
+      if (collapsed && connected) return (
+        <div style={{ background: "rgba(124,25,25,0.15)", border: `1px solid rgba(180,50,50,0.3)`, borderRadius: 10, padding: "11px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }} onClick={() => setCollapsed(false)}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green, boxShadow: `0 0 8px ${T.green}` }} />
+          <div style={{ flex: 1 }}>
+            <span style={{ color: T.text, fontSize: 13, fontWeight: 700 }}>Odoo Connected</span>
+            <span style={{ color: T.muted, fontSize: 12 }}> — {connectedInfo?.db} · {connectedInfo?.user}</span>
+          </div>
+          <Btn variant="danger" onClick={e => { e.stopPropagation(); onDisconnect(); setCollapsed(false); }} style={{ padding: "4px 10px", fontSize: 11 }}>Disconnect</Btn>
+        </div>
+      );
+
+      return (
+        <div style={{ background: T.card, border: `1px solid rgba(180,50,50,0.3)`, borderRadius: 12, padding: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+            <span style={{ fontSize: 20 }}>🔴</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: T.text, fontSize: 14, fontWeight: 700 }}>Connect to Odoo</div>
+              <div style={{ color: T.muted, fontSize: 12 }}>Actual expenses fetched live from your Odoo journal entries</div>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            {[["Odoo URL", url, setUrl, "https://mycompany.odoo.com", "text"], ["Database Name", db, setDb, "mycompany_db", "text"], ["Username / Email", user, setUser, "admin@company.com", "text"], ["Password / API Key", pass, setPass, "••••••••••••", "password"]].map(([label, val, setter, ph, type]) => (
+              <div key={label}>
+                <div style={{ color: T.muted, fontSize: 11, marginBottom: 5 }}>{label}</div>
+                <input type={type} value={val} onChange={e => setter(e.target.value)} onKeyDown={e => e.key === "Enter" && connect()} placeholder={ph} style={inp} />
+              </div>
+            ))}
+          </div>
+          {error && <div style={{ color: T.red, background: "rgba(255,61,90,0.08)", border: `1px solid rgba(255,61,90,0.2)`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12 }}>⚠ {error}</div>}
+          <div style={{ background: "rgba(59,158,255,0.06)", border: `1px solid rgba(59,158,255,0.18)`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: T.muted }}>
+            <strong style={{ color: T.blue }}>ℹ</strong> Data fetched directly from browser to Odoo — no third party. For Odoo.sh/Online use an API Key from Settings → Users → API Keys.
+          </div>
+          <Btn variant="odoo" onClick={connect} disabled={loading} style={{ minWidth: 180 }}>
+            {loading ? <span style={{ display: "flex", alignItems: "center", gap: 8 }}><Spinner />Connecting…</span> : "🔗 Connect to Odoo"}
+          </Btn>
+        </div>
+      );
+    }
+
+    // ─── FETCH ACTUALS PANEL ───────────────────────────────────────────────────
+    function FetchActualsPanel({ odooClient, budgetData, onActualsFetched, actualsData, dateFrom, setDateFrom, dateTo, setDateTo }) {
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [groupBy, setGroupBy] = useState("account");
+      const [matchLog, setMatchLog] = useState([]);
+
+      async function fetchAndMatch() {
+        if (!odooClient || !budgetData) return;
+        setLoading(true); setError(""); setMatchLog([]);
+        try {
+          const actuals = await odooClient.fetchActuals(dateFrom, dateTo, groupBy);
+          const matched = budgetData.map(b => {
+            const exact = actuals.find(a => a.category.toLowerCase() === b.category.toLowerCase());
+            if (exact) return { ...b, actual: exact.actual, matchedTo: exact.category, matchType: "exact" };
+            const bWords = b.category.toLowerCase().split(/\s+|[\/\-,]/);
+            const keyMatch = actuals.find(a => { const aw = a.category.toLowerCase().split(/\s+|[\/\-,]/); return bWords.some(bw => bw.length > 3 && aw.some(w => w.includes(bw) || bw.includes(w))); });
+            if (keyMatch) return { ...b, actual: keyMatch.actual, matchedTo: keyMatch.category, matchType: "keyword" };
+            return { ...b, actual: 0, matchedTo: null, matchType: "unmatched" };
+          });
+          const unbudgeted = actuals.filter(a => !matched.some(m => m.matchedTo?.toLowerCase() === a.category.toLowerCase())).map(a => ({ category: a.category, budget: 0, actual: a.actual, matchedTo: a.category, matchType: "unbudgeted" }));
+          setMatchLog(matched.filter(m => m.matchType !== "exact").map(m => ({ budget: m.category, odoo: m.matchedTo || "— no match", type: m.matchType })));
+          onActualsFetched([...matched, ...unbudgeted]);
+        } catch (e) { setError(e.message); } finally { setLoading(false); }
+      }
+
+      return (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto auto", gap: 12, alignItems: "flex-end", marginBottom: 16 }}>
+            <div><div style={{ color: T.muted, fontSize: 11, marginBottom: 5 }}>Date From</div><input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={inp} /></div>
+            <div><div style={{ color: T.muted, fontSize: 11, marginBottom: 5 }}>Date To</div><input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={inp} /></div>
+            <div><div style={{ color: T.muted, fontSize: 11, marginBottom: 5 }}>Group By</div><select value={groupBy} onChange={e => setGroupBy(e.target.value)} style={inp}><option value="account">Account Name</option><option value="analytic">Analytic Account</option></select></div>
+            <Btn variant="odoo" onClick={fetchAndMatch} disabled={loading || !odooClient || !budgetData} style={{ alignSelf: "flex-end", minWidth: 180, padding: "10px 18px" }}>
+              {loading ? <span style={{ display: "flex", alignItems: "center", gap: 8 }}><Spinner />Fetching…</span> : "⬇ Fetch Actuals from Odoo"}
+            </Btn>
+          </div>
+          {error && <div style={{ color: T.red, background: "rgba(255,61,90,0.08)", border: `1px solid rgba(255,61,90,0.2)`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12 }}>⚠ {error}</div>}
+          {!odooClient && <div style={{ color: T.yellow, background: "rgba(255,186,8,0.06)", border: `1px solid rgba(255,186,8,0.2)`, borderRadius: 8, padding: "9px 14px", fontSize: 12 }}>⚠ Connect to Odoo first (Step 2)</div>}
+          {odooClient && !budgetData && <div style={{ color: T.yellow, background: "rgba(255,186,8,0.06)", border: `1px solid rgba(255,186,8,0.2)`, borderRadius: 8, padding: "9px 14px", fontSize: 12 }}>⚠ Upload your budget file first (Step 1)</div>}
+          {actualsData && (
+            <div style={{ marginTop: 16, background: "rgba(0,217,139,0.04)", border: `1px solid rgba(0,217,139,0.18)`, borderRadius: 10, padding: "14px 18px" }}>
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+                <div><span style={{ color: T.muted, fontSize: 12 }}>Matched: </span><span style={{ color: T.green, fontWeight: 700 }}>{actualsData.filter(r => r.matchType === "exact" || r.matchType === "keyword").length}</span></div>
+                <div><span style={{ color: T.muted, fontSize: 12 }}>Unmatched: </span><span style={{ color: T.yellow, fontWeight: 700 }}>{actualsData.filter(r => r.matchType === "unmatched").length}</span></div>
+                <div><span style={{ color: T.muted, fontSize: 12 }}>Unbudgeted: </span><span style={{ color: T.blue, fontWeight: 700 }}>{actualsData.filter(r => r.matchType === "unbudgeted").length}</span></div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── VARIANCE DASHBOARD ────────────────────────────────────────────────────
+    function VarianceDashboard({ data, period, onReanalyze }) {
+      const [ai, setAi] = useState(""); const [aiLoad, setAiLoad] = useState(false);
+      const [view, setView] = useState("table");
+      const [sortBy, setSortBy] = useState("variance_abs");
+      const [filter, setFilter] = useState("all");
+
+      const enriched = data.map(r => ({ ...r, variance: r.actual - r.budget, pct: r.budget > 0 ? ((r.actual - r.budget) / r.budget) * 100 : (r.actual > 0 ? 100 : 0), favorable: r.actual <= r.budget, status: r.matchType === "unbudgeted" ? "unbudgeted" : r.actual <= r.budget ? "favorable" : "over" }));
+      const filtered = enriched.filter(r => filter === "over" ? r.status === "over" : filter === "under" ? r.status === "favorable" : filter === "unbudgeted" ? r.status === "unbudgeted" : true);
+      const sorted = [...filtered].sort((a, b) => sortBy === "variance_abs" ? Math.abs(b.variance) - Math.abs(a.variance) : sortBy === "variance_pct" ? Math.abs(b.pct) - Math.abs(a.pct) : sortBy === "budget" ? b.budget - a.budget : sortBy === "actual" ? b.actual - a.actual : a.category.localeCompare(b.category));
+
+      const totBudget = enriched.reduce((s, r) => s + r.budget, 0);
+      const totActual = enriched.reduce((s, r) => s + r.actual, 0);
+      const totVar = totActual - totBudget;
+      const overCount = enriched.filter(r => r.status === "over").length;
+      const underCount = enriched.filter(r => r.status === "favorable").length;
+      const unbudgeted = enriched.filter(r => r.status === "unbudgeted");
+      const savings = enriched.filter(r => r.favorable && r.status !== "unbudgeted").reduce((s, r) => s + Math.abs(r.variance), 0);
+
+      async function analyze() {
+        setAiLoad(true); setAi("");
+        const summary = enriched.map(r => `${r.category}: Budget ${fmt$(r.budget)}, Actual ${fmt$(r.actual)}, Variance ${sign(r.variance)}${fmt$(r.variance)} (${sign(r.pct)}${fmtPct(Math.abs(r.pct))})`).join("\n");
+        const top5over = [...enriched].filter(r => !r.favorable).sort((a, b) => b.variance - a.variance).slice(0, 5);
+        const top5under = [...enriched].filter(r => r.favorable && r.budget > 0).sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance)).slice(0, 5);
+        try {
+          const res = await callAI("You are a CFO-level financial analyst. Provide a concise, structured variance report with: 1) Executive summary in 2 sentences 2) Top over-budget risks with root cause hypotheses 3) Notable savings/underspend 4) Unbudgeted items risk 5) Three specific, numbered action items. Use exact dollar amounts from the data.", `Period: ${period}\n\n${summary}\n\nSummary: Total Budget ${fmt$(totBudget)}, Total Actual ${fmt$(totActual)}, Net Variance ${sign(totVar)}${fmt$(totVar)}\nOver budget: ${overCount} | Favorable: ${underCount} | Unbudgeted: ${unbudgeted.length}\nTop overspends: ${top5over.map(r => `${r.category} +${fmt$(r.variance)}`).join(", ")}\nTop savings: ${top5under.map(r => `${r.category} -${fmt$(Math.abs(r.variance))}`).join(", ")}`);
+          setAi(res);
+        } finally { setAiLoad(false); }
+      }
+
+      function exportXLSX() {
+        const rows = [[`Variance Analysis — ${period}`], [`Generated: ${new Date().toLocaleDateString()}`], [], ["Category", "Budget ($)", "Actual ($)", "Variance ($)", "Variance (%)", "Status"], ...sorted.map(r => [r.category, r.budget.toFixed(2), r.actual.toFixed(2), r.variance.toFixed(2), `${r.pct.toFixed(1)}%`, r.favorable ? "Favorable" : "Over Budget"]), [], ["TOTAL", totBudget.toFixed(2), totActual.toFixed(2), totVar.toFixed(2), `${((totVar / Math.max(totBudget, 1)) * 100).toFixed(1)}%`, totVar <= 0 ? "Favorable" : "Over Budget"]];
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws["!cols"] = [{ wch: 32 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 16 }];
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Variance");
+        XLSX.writeFile(wb, `Variance_${period.replace(/\s/g, "_")}.xlsx`);
+      }
+
+      function exportCSV() {
+        const lines = ["Category,Budget,Actual,Variance,Variance%,Status", ...sorted.map(r => `"${r.category}",${r.budget.toFixed(2)},${r.actual.toFixed(2)},${r.variance.toFixed(2)},${r.pct.toFixed(1)}%,${r.favorable ? "Favorable" : "Over Budget"}`)];
+        const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+        a.download = `Variance_${period.replace(/\s/g, "_")}.csv`; a.click();
+      }
+
+      const barData = [...enriched].sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance)).slice(0, 12).map(r => ({ name: r.category.length > 14 ? r.category.slice(0, 13) + "…" : r.category, budget: r.budget, actual: r.actual, favorable: r.favorable }));
+
+      return (
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+            <Btn onClick={analyze} disabled={aiLoad}>🤖 AI Variance Report</Btn>
+            <Btn variant="secondary" onClick={exportXLSX}>⬇ Export Excel</Btn>
+            <Btn variant="secondary" onClick={exportCSV}>⬇ Export CSV</Btn>
+            <Btn variant="outline" onClick={onReanalyze} style={{ marginLeft: "auto" }}>↩ Re-fetch Data</Btn>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 22, flexWrap: "wrap" }}>
+            <KPI icon="📋" label="Total Budget" value={fmtK(totBudget)} sub={period} />
+            <KPI icon="💰" label="Total Actual" value={fmtK(totActual)} color={totActual > totBudget ? T.red : T.green} sub="from Odoo ERP" />
+            <KPI icon="⚡" label="Net Variance" value={`${sign(totVar)}${fmtK(totVar)}`} sub={`${fmtPct(Math.abs(totVar / Math.max(totBudget, 1) * 100))} of budget`} color={totVar > 0 ? T.red : T.green} />
+            <KPI icon="↑" label="Over Budget" value={overCount} sub={`of ${enriched.length} categories`} color={overCount > 0 ? T.red : T.green} />
+            <KPI icon="↓" label="Savings" value={fmtK(savings)} sub="under-budget items" color={T.green} />
+            {unbudgeted.length > 0 && <KPI icon="⚠" label="Unbudgeted" value={fmtK(unbudgeted.reduce((s, r) => s + r.actual, 0))} sub={`${unbudgeted.length} items`} color={T.yellow} />}
+          </div>
+          {unbudgeted.length > 0 && (
+            <div style={{ background: "rgba(255,186,8,0.05)", border: `1px solid rgba(255,186,8,0.2)`, borderRadius: 10, padding: "12px 16px", marginBottom: 18, display: "flex", gap: 10 }}>
+              <span style={{ fontSize: 18 }}>⚠</span>
+              <div>
+                <div style={{ color: T.yellow, fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Unbudgeted Expenses Detected</div>
+                <div style={{ color: T.muted, fontSize: 12 }}>{unbudgeted.map(r => `${r.category} (${fmtK(r.actual)})`).join(" · ")}</div>
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ display: "flex", background: "rgba(255,255,255,0.04)", padding: 3, borderRadius: 8, border: `1px solid ${T.border}`, gap: 2 }}>
+              {[["table", "📋 Table"], ["chart", "📊 Chart"]].map(([id, label]) => (<button key={id} onClick={() => setView(id)} style={{ background: view === id ? T.blue : "transparent", color: view === id ? "#fff" : T.muted, border: "none", borderRadius: 5, padding: "5px 12px", cursor: "pointer", fontSize: 12, fontWeight: view === id ? 700 : 500, fontFamily: "inherit" }}>{label}</button>))}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[["all", "All"], ["over", `Over (${overCount})`], ["under", `Favorable (${underCount})`], ["unbudgeted", `Unbudgeted (${unbudgeted.length})`]].map(([id, label]) => (<button key={id} onClick={() => setFilter(id)} style={{ padding: "5px 12px", borderRadius: 20, border: `1px solid ${filter === id ? T.blue : T.border}`, background: filter === id ? "rgba(59,158,255,0.1)" : "transparent", color: filter === id ? T.blue : T.muted, cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit" }}>{label}</button>))}
+            </div>
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: T.muted, fontSize: 11 }}>Sort:</span>
+              <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{ ...inp, width: 160, padding: "5px 10px" }}>
+                <option value="variance_abs">Variance $ (abs)</option>
+                <option value="variance_pct">Variance %</option>
+                <option value="budget">Budget Amount</option>
+                <option value="actual">Actual Amount</option>
+                <option value="name">Category Name</option>
+              </select>
+            </div>
+          </div>
+          {view === "chart" && (
+            <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+              <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 14px", flex: 3, minWidth: 300 }}>
+                <div style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 14 }}>Top 12 — Budget vs Actual</div>
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={barData} margin={{ top: 0, right: 8, left: 0, bottom: 50 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
+                    <XAxis dataKey="name" tick={{ fill: T.muted, fontSize: 10 }} angle={-35} textAnchor="end" interval={0} />
+                    <YAxis tick={{ fill: T.muted, fontSize: 10 }} tickFormatter={v => `$${(v / 1000).toFixed(0)}K`} />
+                    <Tooltip formatter={v => fmt$(v)} contentStyle={{ background: T.card, border: `1px solid ${T.border2}`, color: T.text, borderRadius: 8 }} />
+                    <Bar dataKey="budget" name="Budget" fill={T.dim} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="actual" name="Actual" radius={[3, 3, 0, 0]}>{barData.map((d, i) => <Cell key={i} fill={d.favorable ? T.green : T.red} />)}</Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 14px", flex: 1, minWidth: 200 }}>
+                <div style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 14 }}>Distribution</div>
+                <ResponsiveContainer width="100%" height={260}>
+                  <PieChart>
+                    <Pie data={[{ name: "On/Under Budget", value: enriched.filter(r => r.favorable && r.status !== "unbudgeted").reduce((s, r) => s + r.actual, 0) }, { name: "Over Budget", value: enriched.filter(r => !r.favorable).reduce((s, r) => s + r.actual, 0) }, { name: "Unbudgeted", value: unbudgeted.reduce((s, r) => s + r.actual, 0) }].filter(d => d.value > 0)} dataKey="value" cx="50%" cy="44%" outerRadius={72} innerRadius={34}>
+                      {[T.green, T.red, T.yellow].map((c, i) => <Cell key={i} fill={c} />)}
+                    </Pie>
+                    <Tooltip formatter={v => fmt$(v)} contentStyle={{ background: T.card, border: `1px solid ${T.border2}`, color: T.text }} />
+                    <Legend wrapperStyle={{ color: T.muted, fontSize: 11 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+          {view === "table" && (
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${T.border2}` }}>
+                    {["Category", "Budget", "Actual", "Variance $", "Variance %", "Status"].map(h => (<th key={h} style={{ padding: "12px 14px", textAlign: "left", color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", whiteSpace: "nowrap" }}>{h}</th>))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((r, i) => (
+                    <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }} onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.025)"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                      <td style={{ padding: "10px 14px", color: T.text, fontSize: 13 }}>{r.category}{r.matchType === "keyword" && <span title={`Matched to: "${r.matchedTo}"`} style={{ marginLeft: 6, color: T.blue, fontSize: 10 }}>~</span>}{r.matchType === "unmatched" && <span title="No Odoo match" style={{ marginLeft: 6, color: T.yellow, fontSize: 10 }}>?</span>}</td>
+                      <td style={{ padding: "10px 14px", color: T.muted, fontFamily: "monospace", fontSize: 13 }}>{r.budget > 0 ? fmt$(r.budget) : <span style={{ color: T.dim }}>—</span>}</td>
+                      <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 13 }}><span style={{ color: T.text }}>{fmt$(r.actual)}</span></td>
+                      <td style={{ padding: "10px 14px", color: r.favorable ? T.green : T.red, fontFamily: "monospace", fontSize: 13, fontWeight: 600 }}>{r.variance === 0 ? "—" : <>{r.favorable ? "−" : "+"}{fmt$(Math.abs(r.variance))}</>}</td>
+                      <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 13 }}>{r.budget > 0 ? <span style={{ color: r.favorable ? T.green : T.red }}>{r.favorable ? "↓" : "↑"}{fmtPct(Math.abs(r.pct))}</span> : <span style={{ color: T.dim }}>—</span>}</td>
+                      <td style={{ padding: "10px 14px" }}>{r.status === "favorable" && <Badge color="green">✓ FAVORABLE</Badge>}{r.status === "over" && <Badge color="red">↑ OVER BUDGET</Badge>}{r.status === "unbudgeted" && <Badge color="yellow">⚠ UNBUDGETED</Badge>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{ borderTop: `2px solid ${T.border2}`, background: "rgba(255,255,255,0.02)" }}>
+                    <td style={{ padding: "12px 14px", color: T.text, fontWeight: 700, fontSize: 13 }}>TOTAL</td>
+                    <td style={{ padding: "12px 14px", color: T.text, fontFamily: "monospace", fontWeight: 700 }}>{fmt$(totBudget)}</td>
+                    <td style={{ padding: "12px 14px", fontFamily: "monospace", fontWeight: 700 }}><span style={{ color: T.text }}>{fmt$(totActual)}</span></td>
+                    <td style={{ padding: "12px 14px", color: totVar <= 0 ? T.green : T.red, fontFamily: "monospace", fontWeight: 700 }}>{totVar <= 0 ? "−" : "+"}{fmt$(Math.abs(totVar))}</td>
+                    <td style={{ padding: "12px 14px", color: totVar <= 0 ? T.green : T.red, fontFamily: "monospace", fontWeight: 700 }}>{totVar <= 0 ? "↓" : "↑"}{fmtPct(Math.abs(totVar / Math.max(totBudget, 1) * 100))}</td>
+                    <td style={{ padding: "12px 14px" }}><Badge color={totVar <= 0 ? "green" : "red"}>{totVar <= 0 ? "✓ ON TRACK" : "↑ OVER BUDGET"}</Badge></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+          <AIBox content={ai} loading={aiLoad} />
+        </div>
+      );
+    }
+
+    // ─── COSTING AGENT ─────────────────────────────────────────────────────────
+    const SAMPLE_BOM = [
+      { id: 1, category: "Material", item: "Steel Sheet 3mm", qty: 80, unit: "kg", unitCost: 1.85 },
+      { id: 2, category: "Material", item: "Aluminium Profile", qty: 12, unit: "m", unitCost: 8.40 },
+      { id: 3, category: "Material", item: "Electronic Components", qty: 1, unit: "lot", unitCost: 340.00 },
+      { id: 4, category: "Labor", item: "Machining", qty: 12, unit: "hrs", unitCost: 45.00 },
+      { id: 5, category: "Labor", item: "Assembly", qty: 28, unit: "hrs", unitCost: 28.00 },
+      { id: 6, category: "Labor", item: "Quality Control", qty: 6, unit: "hrs", unitCost: 35.00 },
+      { id: 7, category: "Overhead", item: "Factory Overhead", qty: 1, unit: "lot", unitCost: 520.00 },
+      { id: 8, category: "Overhead", item: "G&A Allocation", qty: 1, unit: "lot", unitCost: 180.00 },
+    ];
+    const CATS = ["Material", "Labor", "Overhead"];
+
+    function CostingAgent({ odooClient }) {
+      const [bom, setBom] = useState(SAMPLE_BOM);
+      const [project, setProject] = useState("Product X — Batch 50 Units");
+      const [margin, setMargin] = useState(35); const [qty, setQty] = useState(50);
+      const [ai, setAi] = useState(""); const [aiLoad, setAiLoad] = useState(false);
+      const [editMode, setEditMode] = useState(false); const [draft, setDraft] = useState(SAMPLE_BOM);
+      const [chat, setChat] = useState([]); const [chatQ, setChatQ] = useState(""); const [chatLoad, setChatLoad] = useState(false);
+      const [subTab, setSubTab] = useState("bom");
+      const [odooLoad, setOdooLoad] = useState(false); const [odooErr, setOdooErr] = useState("");
+      const [odooBoms, setOdooBoms] = useState([]); const [selBomId, setSelBomId] = useState(null);
+      const nextId = useRef(20); const fileRef = useRef();
+
+      const enriched = bom.map(r => ({ ...r, total: r.qty * r.unitCost }));
+      const totalCost = enriched.reduce((s, r) => s + r.total, 0);
+      const laborTotal = enriched.filter(r => r.category === "Labor").reduce((s, r) => s + r.total, 0);
+      const materialTotal = enriched.filter(r => r.category === "Material").reduce((s, r) => s + r.total, 0);
+      const overheadTotal = enriched.filter(r => r.category === "Overhead").reduce((s, r) => s + r.total, 0);
+      const unitCost = totalCost / Math.max(qty, 1);
+      const sellingPrice = unitCost / (1 - margin / 100);
+      const catTotals = CATS.map(c => ({ name: c, value: enriched.filter(r => r.category === c).reduce((s, r) => s + r.total, 0) })).filter(c => c.value > 0);
+
+      async function listBoms() {
+        if (!odooClient) return;
+        setOdooLoad(true); setOdooErr("");
+        try { setOdooBoms(await odooClient.searchRead("mrp.bom", [], ["id", "product_tmpl_id", "product_qty"], 50)); }
+        catch (e) { setOdooErr(e.message); } finally { setOdooLoad(false); }
+      }
+
+      async function loadBom(bomId) {
+        if (!odooClient) return;
+        setOdooLoad(true); setOdooErr("");
+        try {
+          const lines = await odooClient.searchRead("mrp.bom.line", [["bom_id", "=", bomId]], ["product_id", "product_qty", "product_uom_id"], 200);
+          const pids = lines.map(l => l.product_id[0]);
+          const prods = pids.length ? await odooClient.searchRead("product.product", [["id", "in", pids]], ["id", "name", "standard_price"], 200) : [];
+          const pm = {}; for (const p of prods) pm[p.id] = p;
+          let c = 1;
+          const parsed = lines.map(l => ({ id: c++, category: "Material", item: l.product_id[1], qty: l.product_qty || 1, unit: l.product_uom_id?.[1] || "units", unitCost: pm[l.product_id[0]]?.standard_price || 0 }));
+          if (!parsed.length) throw new Error("No BOM lines found.");
+          setBom(parsed); setDraft(parsed); setAi("");
+          const sb = odooBoms.find(b => b.id === bomId);
+          if (sb) setProject(`${sb.product_tmpl_id[1]} — Batch ${sb.product_qty}`);
+        } catch (e) { setOdooErr(e.message); } finally { setOdooLoad(false); }
+      }
+
+      function handleFile(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+          try {
+            const wb = XLSX.read(ev.target.result, { type: "binary" });
+            const json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+            const h = (json[0] || []).map(x => String(x).toLowerCase());
+            const ii = h.findIndex(x => x.includes("item") || x.includes("name"));
+            const qi = h.findIndex(x => x.includes("qty"));
+            const ci = h.findIndex(x => x.includes("cost") || x.includes("price"));
+            const ui = h.findIndex(x => x.includes("unit") && !x.includes("cost"));
+            const cati = h.findIndex(x => x.includes("categ") || x.includes("type"));
+            if (ii < 0 || qi < 0 || ci < 0) { alert("Need: Item, Qty, Unit Cost columns"); return; }
+            const p = json.slice(1).filter(r => r[ii] && !isNaN(+r[ci])).map(r => ({ id: nextId.current++, category: cati >= 0 ? String(r[cati] || "Material") : "Material", item: String(r[ii]), qty: +r[qi] || 1, unit: ui >= 0 ? String(r[ui] || "pcs") : "pcs", unitCost: +r[ci] || 0 }));
+            if (p.length) { setBom(p); setDraft(p); setAi(""); }
+          } catch (err) { alert(err.message); }
+        };
+        reader.readAsBinaryString(file); e.target.value = "";
+      }
+
+      function exportXLSX() {
+        const rows = [[`BOM — ${project}`], [], ["Category", "Item", "Qty", "Unit", "Unit Cost", "Total", "%"], ...enriched.map(r => [r.category, r.item, r.qty, r.unit, r.unitCost.toFixed(2), r.total.toFixed(2), `${((r.total / totalCost) * 100).toFixed(1)}%`]), [], ["", "", "", "", "TOTAL", totalCost.toFixed(2), "100%"], ["", "", "", "", "Unit Cost", unitCost.toFixed(2), ""], ["", "", "", "", `Selling Price (${margin}%)`, sellingPrice.toFixed(2), ""]];
+        const ws = XLSX.utils.aoa_to_sheet(rows); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "BOM");
+        XLSX.writeFile(wb, `BOM_${project.replace(/[^a-z0-9]/gi, "_")}.xlsx`);
+      }
+
+      async function runOptimize() {
+        setAiLoad(true); setAi("");
+        const bs = enriched.map(r => `[${r.category}] ${r.item}: ${r.qty}${r.unit}×$${r.unitCost.toFixed(2)}=$${r.total.toFixed(2)} (${((r.total / totalCost) * 100).toFixed(1)}%)`).join("\n");
+        try {
+          const res = await callAI("You are a cost engineering expert. Provide: 1) Top 3 cost reductions with % savings 2) Value engineering 3) Make-vs-buy analysis 4) Supplier strategies 5) Margin achievability.", `Project: ${project} | Batch: ${qty}\n${bs}\n\nTotal: ${fmt$(totalCost)} | Unit: ${fmt$(unitCost)} | Margin: ${margin}% | Price: ${fmt$(sellingPrice)}`);
+          setAi(res);
+        } finally { setAiLoad(false); }
+      }
+
+      async function askChat() {
+        if (!chatQ.trim()) return;
+        const q = chatQ; setChatQ(""); setChat(h => [...h, { role: "user", text: q }]); setChatLoad(true);
+        try {
+          const bs = enriched.map(r => `${r.category}|${r.item}:${r.qty}${r.unit}×$${r.unitCost}=$${r.total.toFixed(2)}`).join("\n");
+          const res = await callAI(`Costing assistant: ${project} (Batch:${qty})\n${bs}\nTotal:${fmt$(totalCost)} Unit:${fmt$(unitCost)} Margin:${margin}% Price:${fmt$(sellingPrice)}`, q);
+          setChat(h => [...h, { role: "ai", text: res }]);
+        } finally { setChatLoad(false); }
+      }
+
+      const stab = id => ({ padding: "8px 16px", cursor: "pointer", fontSize: 12, fontWeight: 600, color: subTab === id ? T.green : T.muted, background: "none", border: "none", borderBottom: subTab === id ? `2px solid ${T.green}` : "2px solid transparent", fontFamily: "inherit" });
+
+      return (
+        <div>
+          {odooClient && (
+            <div style={{ background: "rgba(124,25,25,0.12)", border: `1px solid rgba(180,50,50,0.25)`, borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ color: T.text, fontSize: 13, fontWeight: 600 }}>🔴 Odoo BOM</span>
+              <Btn variant="odoo" onClick={listBoms} disabled={odooLoad} style={{ fontSize: 12, padding: "7px 13px" }}>{odooLoad ? "…" : "📋 List BOMs"}</Btn>
+              {odooBoms.length > 0 && <select value={selBomId || ""} onChange={e => setSelBomId(+e.target.value)} style={{ ...inp, width: 260 }}><option value="">— Select BOM —</option>{odooBoms.map(b => <option key={b.id} value={b.id}>{b.product_tmpl_id[1]} (qty: {b.product_qty})</option>)}</select>}
+              {selBomId && <Btn variant="odoo" onClick={() => loadBom(selBomId)} disabled={odooLoad} style={{ fontSize: 12, padding: "7px 13px" }}>⬇ Load</Btn>}
+              {odooErr && <span style={{ color: T.red, fontSize: 12 }}>⚠ {odooErr}</span>}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <input value={project} onChange={e => setProject(e.target.value)} style={{ ...inp, flex: 2, minWidth: 200 }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: T.muted, fontSize: 12 }}>Batch</span><input type="number" value={qty} onChange={e => setQty(+e.target.value || 1)} style={{ ...inp, width: 80 }} /></div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: T.muted, fontSize: 12 }}>Margin</span><input type="number" value={margin} onChange={e => setMargin(+e.target.value)} style={{ ...inp, width: 70 }} /><span style={{ color: T.muted, fontSize: 12 }}>%</span></div>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+            <KPI label="Total Batch Cost" value={fmt$(totalCost)} />
+            <KPI label={`Unit Cost (÷${qty})`} value={fmt$(unitCost)} />
+            <KPI label="Selling Price" value={fmt$(sellingPrice)} color={T.green} sub={`${margin}% margin`} />
+            <KPI label="Gross Profit/Unit" value={fmt$(sellingPrice - unitCost)} color={T.green} />
+            <KPI label="BOM Lines" value={bom.length} color={T.blue} />
+          </div>
+          <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 14px", flex: 1, minWidth: 200 }}>
+              <div style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>Cost Split</div>
+              <ResponsiveContainer width="100%" height={180}><PieChart><Pie data={catTotals} dataKey="value" cx="50%" cy="50%" outerRadius={66} innerRadius={30} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>{catTotals.map((_, i) => <Cell key={i} fill={PIE[i]} />)}</Pie><Tooltip formatter={v => fmt$(v)} contentStyle={{ background: T.card, border: `1px solid ${T.border2}`, color: T.text }} /></PieChart></ResponsiveContainer>
+            </div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 14px", flex: 2, minWidth: 280 }}>
+              <div style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 12 }}>Top Cost Items</div>
+              <ResponsiveContainer width="100%" height={180}><BarChart data={[...enriched].sort((a, b) => b.total - a.total).slice(0, 6)} layout="vertical" margin={{ left: 120, right: 20 }}><XAxis type="number" tick={{ fill: T.muted, fontSize: 10 }} tickFormatter={v => `$${v}`} /><YAxis type="category" dataKey="item" tick={{ fill: T.text, fontSize: 11 }} width={115} /><CartesianGrid strokeDasharray="3 3" stroke={T.border} horizontal={false} /><Tooltip formatter={v => fmt$(v)} contentStyle={{ background: T.card, border: `1px solid ${T.border2}`, color: T.text }} /><Bar dataKey="total" radius={[0, 4, 4, 0]}>{enriched.map((_, i) => <Cell key={i} fill={PIE[i % PIE.length]} />)}</Bar></BarChart></ResponsiveContainer>
+            </div>
+          </div>
+          <div style={{ display: "flex", borderBottom: `1px solid ${T.border}`, marginBottom: 14, alignItems: "center" }}>
+            {[["bom", "📋 BOM"], ["overhead", "⚙️ Overhead"], ["chat", "💬 Ask AI"]].map(([id, label]) => (<button key={id} style={stab(id)} onClick={() => setSubTab(id)}>{label}</button>))}
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8, paddingBottom: 6 }}>
+              <Btn variant="secondary" onClick={() => fileRef.current.click()} style={{ fontSize: 12, padding: "6px 12px" }}>📂 Upload</Btn>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleFile} />
+              <Btn variant="secondary" onClick={exportXLSX} style={{ fontSize: 12, padding: "6px 12px" }}>⬇ Export</Btn>
+              <Btn onClick={runOptimize} disabled={aiLoad} style={{ fontSize: 12, padding: "6px 12px" }}>🤖 Optimize</Btn>
+            </div>
+          </div>
+          {subTab === "bom" && (
+            <>
+              <Btn variant="secondary" onClick={() => { setEditMode(!editMode); setDraft(bom); }} style={{ marginBottom: 10 }}>{editMode ? "✕ Cancel" : "✏️ Edit BOM"}</Btn>
+              {editMode && (
+                <div style={{ background: T.card, border: `1px solid ${T.border2}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+                  {draft.map((r, i) => (
+                    <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1fr 2.5fr 0.7fr 0.7fr 1fr auto", gap: 6, marginBottom: 6 }}>
+                      <select value={r.category} onChange={e => { const n = [...draft]; n[i] = { ...n[i], category: e.target.value }; setDraft(n); }} style={inp}>{CATS.map(c => <option key={c} value={c}>{c}</option>)}</select>
+                      <input value={r.item} onChange={e => { const n = [...draft]; n[i] = { ...n[i], item: e.target.value }; setDraft(n); }} style={inp} />
+                      <input type="number" value={r.qty} onChange={e => { const n = [...draft]; n[i] = { ...n[i], qty: +e.target.value }; setDraft(n); }} style={inp} />
+                      <input value={r.unit} onChange={e => { const n = [...draft]; n[i] = { ...n[i], unit: e.target.value }; setDraft(n); }} style={inp} />
+                      <input type="number" value={r.unitCost} onChange={e => { const n = [...draft]; n[i] = { ...n[i], unitCost: +e.target.value }; setDraft(n); }} style={inp} />
+                      <Btn variant="danger" onClick={() => setDraft(draft.filter((_, j) => j !== i))} style={{ padding: "8px 10px" }}>✕</Btn>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    {CATS.map(c => <Btn key={c} variant="secondary" style={{ fontSize: 12 }} onClick={() => setDraft([...draft, { id: nextId.current++, category: c, item: `New ${c}`, qty: 1, unit: "pcs", unitCost: 0 }])}>+ {c}</Btn>)}
+                    <Btn onClick={() => { setBom(draft); setEditMode(false); setAi(""); }}>Save</Btn>
+                  </div>
+                </div>
+              )}
+              <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
+                  <thead><tr style={{ borderBottom: `1px solid ${T.border2}` }}>{["Category", "Item", "Qty", "Unit", "Unit Cost", "Total", "% Cost"].map(h => <th key={h} style={{ padding: "10px 13px", textAlign: "left", color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em" }}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    {CATS.map(cat => { const cr = enriched.filter(r => r.category === cat); if (!cr.length) return null; const ct = cr.reduce((s, r) => s + r.total, 0); return [<tr key={`h-${cat}`} style={{ background: "rgba(255,255,255,0.02)" }}><td colSpan={7} style={{ padding: "7px 13px", color: T.muted, fontSize: 10, fontWeight: 700, textTransform: "uppercase" }}>{cat} — {fmt$(ct)} ({((ct / totalCost) * 100).toFixed(1)}%)</td></tr>, ...cr.map(r => (<tr key={r.id} style={{ borderBottom: `1px solid ${T.border}` }} onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.02)"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}><td style={{ padding: "9px 13px", color: T.muted, fontSize: 12 }}>{r.category}</td><td style={{ padding: "9px 13px", color: T.text, fontSize: 13 }}>{r.item}</td><td style={{ padding: "9px 13px", color: T.muted, fontFamily: "monospace" }}>{r.qty}</td><td style={{ padding: "9px 13px", color: T.muted }}>{r.unit}</td><td style={{ padding: "9px 13px", color: T.muted, fontFamily: "monospace" }}>${r.unitCost.toFixed(2)}</td><td style={{ padding: "9px 13px", color: T.green, fontWeight: 700, fontFamily: "monospace" }}>${r.total.toFixed(2)}</td><td style={{ padding: "9px 13px" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ height: 5, background: T.border, borderRadius: 3, width: 56 }}><div style={{ height: 5, background: PIE[CATS.indexOf(cat)], borderRadius: 3, width: `${(r.total / totalCost) * 100}%` }} /></div><span style={{ color: T.muted, fontSize: 11, fontFamily: "monospace" }}>{((r.total / totalCost) * 100).toFixed(1)}%</span></div></td></tr>))]; })}
+                    <tr style={{ borderTop: `2px solid ${T.border2}`, background: "rgba(255,255,255,0.02)" }}><td colSpan={5} style={{ padding: "11px 13px", color: T.text, fontWeight: 700 }}>TOTAL</td><td style={{ padding: "11px 13px", color: T.green, fontWeight: 700, fontFamily: "monospace", fontSize: 14 }}>{fmt$(totalCost)}</td><td style={{ padding: "11px 13px", color: T.muted, fontSize: 12 }}>100%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          {subTab === "overhead" && (
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+                {[{ l: "Direct Material", v: materialTotal, c: PIE[0] }, { l: "Direct Labor", v: laborTotal, c: PIE[1] }, { l: "Overhead", v: overheadTotal, c: PIE[2] }].map(r => (
+                  <div key={r.l} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, padding: 16 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><div style={{ width: 10, height: 10, borderRadius: 2, background: r.c }} /><span style={{ color: T.muted, fontSize: 11 }}>{r.l}</span></div>
+                    <div style={{ color: r.c, fontSize: 22, fontWeight: 700, fontFamily: "monospace" }}>{fmt$(r.v)}</div>
+                    <div style={{ color: T.muted, fontSize: 11, marginTop: 4 }}>{((r.v / Math.max(totalCost, 1)) * 100).toFixed(1)}% of total</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {subTab === "chat" && (
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 20 }}>
+              <div style={{ color: T.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 14 }}>Ask the Costing Agent</div>
+              <div style={{ minHeight: 140, maxHeight: 280, overflowY: "auto", marginBottom: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                {!chat.length && <div style={{ color: T.muted, fontSize: 13, fontStyle: "italic" }}>Try: "What's the biggest cost driver?" · "How to reduce labor by 20%?" · "Is the margin realistic?"</div>}
+                {chat.map((m, i) => (<div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "82%", background: m.role === "user" ? "rgba(0,217,139,0.07)" : "rgba(255,255,255,0.04)", border: `1px solid ${m.role === "user" ? "rgba(0,217,139,0.2)" : T.border}`, borderRadius: 9, padding: "10px 14px", color: T.text, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{m.text}</div>))}
+                {chatLoad && <div style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 8, color: T.muted, fontSize: 13 }}><Spinner /> Thinking…</div>}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={chatQ} onChange={e => setChatQ(e.target.value)} onKeyDown={e => e.key === "Enter" && !chatLoad && askChat()} placeholder="Ask about costs, margins, optimization…" style={{ ...inp, flex: 1 }} />
+                <Btn onClick={askChat} disabled={chatLoad || !chatQ.trim()}>Send ↵</Btn>
+              </div>
+            </div>
+          )}
+          <AIBox content={ai} loading={aiLoad} />
+        </div>
+      );
+    }
+
+    // ─── VOICE HELP ────────────────────────────────────────────────────────────
+    function VoiceHelp({ onClose }) {
+      const cmds = [
+        { g: "Variance Agent", items: ["Analyze", "Fetch actuals from Odoo", "Export Excel", "Export CSV", "Fetch year 2024", "Quarter 1 2025"] },
+        { g: "Costing Agent", items: ["Optimize costs", "List BOMs"] },
+        { g: "Navigation", items: ["Go to variance", "Switch to costing"] },
+      ];
+      return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }}>
+          <div style={{ background: T.card, border: `1px solid ${T.border2}`, borderRadius: 14, padding: 28, maxWidth: 520, width: "92%" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <div><div style={{ color: T.text, fontSize: 16, fontWeight: 700 }}>🎤 Voice Commands</div><div style={{ color: T.muted, fontSize: 12, marginTop: 3 }}>Click mic → speak → auto-stops</div></div>
+              <button onClick={onClose} style={{ background: "none", border: "none", color: T.muted, cursor: "pointer", fontSize: 20 }}>✕</button>
+            </div>
+            {cmds.map(g => (<div key={g.g} style={{ marginBottom: 16 }}>
+              <div style={{ color: T.green, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700, marginBottom: 8 }}>{g.g}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{g.items.map(c => <span key={c} style={{ background: "rgba(255,255,255,0.05)", border: `1px solid ${T.border}`, borderRadius: 20, padding: "4px 11px", fontSize: 12, color: T.text }}>"{c}"</span>)}</div>
+            </div>))}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── APP ───────────────────────────────────────────────────────��───────────
+    function App() {
+      const [tab, setTab] = useState("variance");
+      const [odooClient, setOdooClient] = useState(null); const [odooInfo, setOdooInfo] = useState(null);
+      const [budgetData, setBudgetData] = useState(null);
+      const [actualsData, setActualsData] = useState(null);
+      const [period, setPeriod] = useState("Q1 2025");
+      const [dateFrom, setDateFrom] = useState("2025-01-01"); const [dateTo, setDateTo] = useState("2025-03-31");
+      const [workflowStep, setWorkflowStep] = useState(0);
+      const [voiceHelp, setVoiceHelp] = useState(false);
+      const [voiceToast, setVoiceToast] = useState(null);
+      const [showApiKey, setShowApiKey] = useState(false);
+      const toastTimer = useRef(null);
+      const hasApiKey = !!localStorage.getItem("ai_api_key");
+      const aiProvider = localStorage.getItem("ai_provider") || "gemini";
+      const providerLabel = { gemini: "Gemini", groq: "Groq", claude: "Claude" }[aiProvider] || "AI";
+
+      useEffect(() => { if (budgetData && workflowStep === 0) setWorkflowStep(1); }, [budgetData]);
+      useEffect(() => { if (odooClient && workflowStep === 1) setWorkflowStep(2); }, [odooClient]);
+      useEffect(() => { if (actualsData && workflowStep < 3) setWorkflowStep(3); }, [actualsData]);
+
+      function showToast(msg, type = "ok") {
+        setVoiceToast({ msg, type });
+        if (toastTimer.current) clearTimeout(toastTimer.current);
+        toastTimer.current = setTimeout(() => setVoiceToast(null), 3500);
+      }
+
+      function handleVoice(cmd, transcript) {
+        showToast(transcript, cmd.action === "unknown" ? "warn" : "ok");
+        if (cmd.action === "navigate") { setTab(cmd.tab === "variance" ? "variance" : "costing"); return; }
+        if (tab === "variance") {
+          if (cmd.action === "setYear") { setDateFrom(`${cmd.value}-01-01`); setDateTo(`${cmd.value}-12-31`); setPeriod(`FY ${cmd.value}`); }
+          if (cmd.action === "setQuarter") {
+            const qStarts = ["01-01", "04-01", "07-01", "10-01"], qEnds = ["03-31", "06-30", "09-30", "12-31"];
+            const y = cmd.year, q = cmd.q - 1;
+            setDateFrom(`${y}-${qStarts[q]}`); setDateTo(`${y}-${qEnds[q]}`); setPeriod(`Q${cmd.q} ${y}`);
+          }
+        }
+      }
+
+      const steps = [
+        { label: "Upload Budget", sub: budgetData ? `${budgetData.length} categories` : "Excel or CSV" },
+        { label: "Connect Odoo", sub: odooClient ? odooInfo?.db : "Your ERP instance" },
+        { label: "Fetch Actuals", sub: actualsData ? `${actualsData.length} accounts` : "Pull from Odoo" },
+        { label: "View Report", sub: "AI-powered analysis" },
+      ];
+
+      return (
+        <div style={{ background: T.bg, minHeight: "100vh", fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;700&display=swap');
+            @keyframes spin { to { transform: rotate(360deg); } }
+            @keyframes vp { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(2.4); opacity: 0; } }
+            @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+            * { box-sizing: border-box; }
+            input, select { color-scheme: dark; }
+            input:focus, select:focus { border-color: rgba(0,217,139,0.4) !important; box-shadow: 0 0 0 3px rgba(0,217,139,0.07); }
+            ::-webkit-scrollbar { width: 5px; height: 5px; }
+            ::-webkit-scrollbar-thumb { background: #223060; border-radius: 3px; }
+            input::placeholder { color: #273550; }
+            option { background: #0f1520; }
+          `}</style>
+
+          {/* HEADER */}
+          <div style={{ borderBottom: `1px solid ${T.border}`, padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: "rgba(7,9,15,0.96)", backdropFilter: "blur(20px)", zIndex: 100, height: 58, gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+              <div style={{ width: 30, height: 30, background: T.green, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, color: "#07090f", fontWeight: 900 }}>⚡</div>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>FinanceAI Suite</div>
+                <div style={{ color: T.muted, fontSize: 9, letterSpacing: "0.08em" }}>BUDGET · COSTING · ODOO · CLAUDE AI</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", background: "rgba(255,255,255,0.04)", padding: 3, borderRadius: 9, border: `1px solid ${T.border}`, gap: 2 }}>
+              {[["variance", "📊 Variance"], ["costing", "🔧 Costing"]].map(([id, label]) => (
+                <button key={id} onClick={() => setTab(id)} style={{ background: tab === id ? T.green : "transparent", color: tab === id ? "#07090f" : T.muted, border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 12.5, fontWeight: tab === id ? 700 : 500, fontFamily: "inherit", transition: "all 0.2s" }}>{label}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              {odooClient && <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(124,25,25,0.2)", border: `1px solid rgba(180,50,50,0.3)`, borderRadius: 6, padding: "5px 11px" }}><div style={{ width: 7, height: 7, borderRadius: "50%", background: T.green, boxShadow: `0 0 6px ${T.green}` }} /><span style={{ fontSize: 11, color: T.text, fontWeight: 600 }}>{odooInfo?.db}</span></div>}
+              <button onClick={() => setShowApiKey(true)} style={{ background: "none", border: `1px solid ${hasApiKey ? T.border : T.yellow}`, borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: hasApiKey ? T.muted : T.yellow, fontSize: 11, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+                ⚙ {hasApiKey ? `${providerLabel} ✓` : "Set AI Key"}
+              </button>
+              <button onClick={() => setVoiceHelp(true)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: T.muted, fontSize: 11, fontFamily: "inherit" }}>📖 Commands</button>
+              <VoiceMic onCommand={handleVoice} />
+            </div>
+          </div>
+
+          {/* MAIN */}
+          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 22px" }}>
+            {!hasApiKey && (
+              <div style={{ background: "rgba(255,186,8,0.05)", border: `1px solid rgba(255,186,8,0.2)`, borderRadius: 10, padding: "12px 16px", marginBottom: 20, display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 18 }}>⚠</span>
+                <div style={{ flex: 1 }}><span style={{ color: T.yellow, fontWeight: 700, fontSize: 13 }}>No AI key set</span><span style={{ color: T.muted, fontSize: 13 }}> — Add a free Gemini or Groq key to enable AI analysis.</span></div>
+                <Btn onClick={() => setShowApiKey(true)} style={{ fontSize: 12, padding: "6px 12px" }}>⚙ Set Free Key</Btn>
+              </div>
+            )}
+
+            {tab === "variance" ? (
+              <>
+                <div style={{ marginBottom: 28 }}>
+                  <h2 style={{ margin: 0, fontSize: 21, fontWeight: 700, letterSpacing: "-0.02em" }}>Budget vs Actual Variance Analysis</h2>
+                  <p style={{ margin: "5px 0 0", color: T.muted, fontSize: 13 }}>Upload your budget file → Connect Odoo → Fetch live actuals → Get AI-powered variance insights</p>
+                </div>
+                <StepIndicator steps={steps} current={workflowStep} />
+
+                {workflowStep <= 0 && (
+                  <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 14, padding: 24, marginBottom: 20 }}>
+                    <div style={{ color: T.text, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Step 1 — Upload Budget File</div>
+                    <div style={{ color: T.muted, fontSize: 13, marginBottom: 20 }}>Your Excel/CSV with planned budget amounts. Needs a <strong style={{ color: T.text }}>Category</strong> column and a <strong style={{ color: T.text }}>Budget</strong> column — auto-detected.</div>
+                    <BudgetUploader onUpload={d => { setBudgetData(d); setActualsData(null); }} budgetData={budgetData} period={period} setPeriod={setPeriod} />
+                  </div>
+                )}
+
+                {workflowStep >= 1 && workflowStep <= 1 && (
+                  <>
+                    {budgetData && (
+                      <div style={{ background: "rgba(0,217,139,0.04)", border: `1px solid rgba(0,217,139,0.18)`, borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ color: T.green, fontSize: 18 }}>✅</span>
+                        <div><span style={{ color: T.green, fontWeight: 700 }}>Budget loaded</span><span style={{ color: T.muted, fontSize: 13 }}> — {budgetData.length} categories · Total {fmt$(budgetData.reduce((s, r) => s + r.budget, 0))}</span></div>
+                        <Btn variant="secondary" onClick={() => { setBudgetData(null); setActualsData(null); setWorkflowStep(0); }} style={{ marginLeft: "auto", fontSize: 11, padding: "5px 10px" }}>↩ Replace</Btn>
+                      </div>
+                    )}
+                    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 14, padding: 24, marginBottom: 20 }}>
+                      <div style={{ color: T.text, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Step 2 — Connect to Odoo</div>
+                      <div style={{ color: T.muted, fontSize: 13, marginBottom: 20 }}>Actual expenses will be pulled from <strong style={{ color: T.text }}>account.move.line</strong> — posted journal entries for expense accounts.</div>
+                      <OdooConnect onConnect={(c, i) => { setOdooClient(c); setOdooInfo(i); }} connected={!!odooClient} connectedInfo={odooInfo} onDisconnect={() => { setOdooClient(null); setOdooInfo(null); setActualsData(null); setWorkflowStep(1); }} />
+                    </div>
+                  </>
+                )}
+
+                {workflowStep >= 2 && workflowStep <= 2 && (
+                  <>
+                    <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+                      <div style={{ background: "rgba(0,217,139,0.04)", border: `1px solid rgba(0,217,139,0.18)`, borderRadius: 10, padding: "10px 16px", flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ color: T.green }}>✅</span>
+                        <div><span style={{ color: T.green, fontWeight: 700, fontSize: 13 }}>Budget: </span><span style={{ color: T.muted, fontSize: 13 }}>{budgetData?.length} categories · {fmt$(budgetData?.reduce((s, r) => s + r.budget, 0) || 0)}</span></div>
+                        <Btn variant="secondary" onClick={() => { setBudgetData(null); setActualsData(null); setWorkflowStep(0); }} style={{ marginLeft: "auto", fontSize: 11, padding: "4px 9px" }}>↩</Btn>
+                      </div>
+                      <div style={{ background: "rgba(0,217,139,0.04)", border: `1px solid rgba(0,217,139,0.18)`, borderRadius: 10, padding: "10px 16px", flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
+                        <span>🔴</span>
+                        <div><span style={{ color: T.green, fontWeight: 700, fontSize: 13 }}>Odoo: </span><span style={{ color: T.muted, fontSize: 13 }}>{odooInfo?.db} · {odooInfo?.user}</span></div>
+                        <Btn variant="secondary" onClick={() => { setOdooClient(null); setOdooInfo(null); setActualsData(null); setWorkflowStep(1); }} style={{ marginLeft: "auto", fontSize: 11, padding: "4px 9px" }}>↩</Btn>
+                      </div>
+                    </div>
+                    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 14, padding: 24 }}>
+                      <div style={{ color: T.text, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Step 3 — Fetch Actual Expenses from Odoo</div>
+                      <div style={{ color: T.muted, fontSize: 13, marginBottom: 20 }}>Select your date range. Actuals are fetched from posted journal entries, then <strong style={{ color: T.text }}>automatically matched</strong> to your budget categories.</div>
+                      <FetchActualsPanel odooClient={odooClient} budgetData={budgetData} onActualsFetched={d => setActualsData(d)} actualsData={actualsData} dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo} />
+                      {actualsData && <div style={{ marginTop: 14 }}><Btn onClick={() => setWorkflowStep(3)}>📊 View Variance Report →</Btn></div>}
+                    </div>
+                  </>
+                )}
+
+                {workflowStep >= 3 && actualsData && (
+                  <>
+                    <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <Badge color="green">📊 Budget: {fmt$(budgetData?.reduce((s, r) => s + r.budget, 0) || 0)} · {budgetData?.length} categories</Badge>
+                        <Badge color="blue">🔴 Odoo: {odooInfo?.db} · {dateFrom} → {dateTo}</Badge>
+                        <Badge color="yellow">⚡ {period}</Badge>
+                      </div>
+                      <Btn variant="secondary" onClick={() => setWorkflowStep(2)} style={{ marginLeft: "auto", fontSize: 12, padding: "6px 12px" }}>↩ Re-fetch Actuals</Btn>
+                    </div>
+                    <VarianceDashboard data={actualsData} period={period} onReanalyze={() => setWorkflowStep(2)} />
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <div style={{ marginBottom: 22 }}>
+                  <h2 style={{ margin: 0, fontSize: 21, fontWeight: 700, letterSpacing: "-0.02em" }}>Product Costing Agent</h2>
+                  <p style={{ margin: "5px 0 0", color: T.muted, fontSize: 13 }}>Build BOM, configure overhead, calculate margins. Pull BOM from Odoo MRP if connected.</p>
+                </div>
+                <CostingAgent odooClient={odooClient} />
+              </>
+            )}
+          </div>
+
+          {voiceToast && (
+            <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: "rgba(7,9,15,0.95)", border: `1px solid ${voiceToast.type === "warn" ? T.yellow : T.green}`, borderRadius: 12, padding: "12px 20px", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", animation: "slideUp 0.25s ease", backdropFilter: "blur(20px)", display: "flex", alignItems: "center", gap: 10, minWidth: 280 }}>
+              <div style={{ width: 7, height: 7, borderRadius: "50%", background: voiceToast.type === "warn" ? T.yellow : T.green }} />
+              <span style={{ color: T.text, fontSize: 13 }}>"{voiceToast.msg}"</span>
+              {voiceToast.type === "warn" && <span style={{ color: T.yellow, fontSize: 11 }}>— not recognized</span>}
+            </div>
+          )}
+
+          {voiceHelp && <VoiceHelp onClose={() => setVoiceHelp(false)} />}
+          {showApiKey && <ApiKeyModal onClose={() => setShowApiKey(false)} />}
+        </div>
+      );
+    }
+
+    document.getElementById("loading").style.display = "none";
+    createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
